@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Medico Virtual BSL</title>
+  <style>
+    /* Fondo con imagen */
+    body {
+      background: url("images/doctorback.jpg") no-repeat center center fixed;
+      background-size: cover;
+      margin: 0;
+      padding: 0;
+      font-family: Arial, sans-serif;
+    }
+
+    /* Encabezado con el logo */
+    header {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      padding: 10px 20px;
+      box-sizing: border-box;
+      display: flex;
+      align-items: center;
+      /* Si lo requieres, puedes añadir un fondo semitransparente */
+      /* background-color: rgba(0, 0, 0, 0.5); */
+    }
+    #logo {
+      height: 50px;
+    }
+
+    /* Título principal */
+    h1 {
+      text-align: center;
+      margin-top: 80px; /* Se deja espacio para el header */
+      color: white;
+    }
+
+    /* Botón de sesión en la parte inferior */
+    #sessionBtn {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 15px 30px;
+      border: none;
+      border-radius: 5px;
+      font-size: 16px;
+      color: #fff;
+      cursor: pointer;
+    }
+    /* Botón para iniciar (verde) */
+    .start {
+      background-color: green;
+    }
+    /* Estado "Conectando" (gris para indicar espera) */
+    .connecting {
+      background-color: gray;
+    }
+    /* Botón para terminar (rojo) */
+    .stop {
+      background-color: red;
+    }
+
+    /* Contenedor para la transcripción */
+    #transcripcion {
+      background-color: rgba(255, 255, 255, 0.8);
+      border: 1px solid #ccc;
+      padding: 10px;
+      margin-top: 20px;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <img src="images/bsl-logo.jpg" alt="Logo BSL" id="logo">
+  </header>
+
+  <h1>Aplicación Realtime API con WebRTC</h1>
+
+  <!-- Botón para iniciar/terminar sesión -->
+  <button id="sessionBtn" class="start">Iniciar sesión</button>
+
+  <script>
+    // Variables globales para controlar la conexión y el estado de la sesión
+    let pc = null;
+    let dc = null;
+    let sessionActive = false;
+    let conversacion = [];
+
+    async function getChatbotData() {
+      const urlParams = new URLSearchParams(window.location.search);
+      const _id = urlParams.get("_id");
+      
+      if (!_id) {
+        console.warn("No se proporcionó _id en la URL");
+        return null;
+      }
+      
+      try {
+        console.log("Obteniendo datos de CHATBOT para _id:", _id);
+        const response = await fetch(`https://www.bsl.com.co/_functions/chatbot?_id=${_id}`);
+        const data = await response.json();
+        if (data.error) {
+          console.error("Error al obtener los datos:", data.error);
+          return null;
+        }
+        console.log("Datos obtenidos:", data);
+        return data;
+      } catch (error) {
+        console.error("Error al obtener los datos de CHATBOT:", error);
+        return null;
+      }
+    }
+
+    // Función para mostrar la transcripción de la conversación
+    function imprimirTranscripcion() {
+      const contenedor = document.createElement("div");
+      contenedor.id = "transcripcion";
+      contenedor.innerText = "Transcripción de la conversación:\n" + conversacion.join("\n");
+      document.body.appendChild(contenedor);
+    }
+
+    // Función para iniciar la conexión WebRTC
+    async function init() {
+      console.log("Iniciando la conexión con la Realtime API...");
+
+      const chatbotData = await getChatbotData();
+      if (!chatbotData || !chatbotData.primerNombre) {
+        console.error("No se pueden generar preguntas sin datos.");
+        // Revertir el botón a "Iniciar sesión" en caso de error
+        const btn = document.getElementById("sessionBtn");
+        btn.textContent = "Iniciar sesión";
+        btn.classList.remove("connecting");
+        btn.classList.add("start");
+        return;
+      }
+
+      const tokenResponse = await fetch("/session");
+      const sessionData = await tokenResponse.json();
+      console.log("Token efímero obtenido:", sessionData);
+
+      if (!sessionData?.client_secret?.value) {
+        console.error("No se recibió un token efímero válido.");
+        const btn = document.getElementById("sessionBtn");
+        btn.textContent = "Iniciar sesión";
+        btn.classList.remove("connecting");
+        btn.classList.add("start");
+        return;
+      }
+      const EPHEMERAL_KEY = sessionData.client_secret.value;
+
+      pc = new RTCPeerConnection();
+      console.log("RTCPeerConnection creada.");
+
+      try {
+        console.log("Solicitando acceso al micrófono...");
+        const ms = await navigator.mediaDevices.getUserMedia({ audio: true });
+        console.log("Acceso concedido. Pistas obtenidas:", ms.getTracks());
+        ms.getTracks().forEach(track => pc.addTrack(track, ms));
+      } catch (err) {
+        console.error("Error al obtener el micrófono:", err);
+        const btn = document.getElementById("sessionBtn");
+        btn.textContent = "Iniciar sesión";
+        btn.classList.remove("connecting");
+        btn.classList.add("start");
+        return;
+      }
+
+      const audioEl = document.createElement("audio");
+      audioEl.autoplay = true;
+      document.body.appendChild(audioEl);
+
+      pc.ontrack = (event) => {
+        console.log("Recibiendo stream remoto:", event.streams);
+        if (event.streams && event.streams[0]) {
+          audioEl.srcObject = event.streams[0];
+        }
+      };
+
+      console.log("Creando DataChannel...");
+      dc = pc.createDataChannel("oai-events");
+
+      dc.addEventListener("message", (e) => {
+        const realtimeEvent = JSON.parse(e.data);
+        console.log("Evento recibido del modelo:", realtimeEvent);
+
+        if (realtimeEvent.type === "session.created") {
+          console.log("Sesión creada. Enviando session.update con instrucciones.");
+          const systemInstructions = `
+Eres un asistente de salud ocupacional de BSL. Pregúntale a este paciente sobre su historial de salud.
+El paciente se llama ${chatbotData.primerNombre.trim()}.
+Historial de salud: ${chatbotData.encuestaSalud.join(", ")}.
+Antecedentes familiares: ${chatbotData.antecedentesFamiliares.join(", ")}.
+
+Siempre saluda al paciente por su nombre y menciónale su historial de salud.
+Sé profesional, cálido y empático. Sé breve!
+Al finalizar la entrevista despídete y dile que en breve nos comunicaremos para entregar su certificado.
+          `;
+          const sessionUpdate = {
+            type: "session.update",
+            session: { instructions: systemInstructions }
+          };
+          dc.send(JSON.stringify(sessionUpdate));
+        } else if (realtimeEvent.type === "session.updated") {
+          console.log("Sesión actualizada. Enviando primera respuesta.");
+          const responseCreate = {
+            type: "response.create",
+            response: {
+              modalities: ["text"],
+              instructions: `Hola ${chatbotData.primerNombre.trim()}, ¿cómo te sientes hoy?`
+            }
+          };
+          conversacion.push("Sistema: " + responseCreate.response.instructions);
+          dc.send(JSON.stringify(responseCreate));
+          // Una vez establecida la conexión, cambia el botón a "Terminar sesión"
+          const btn = document.getElementById("sessionBtn");
+          btn.textContent = "Terminar sesión";
+          btn.classList.remove("connecting");
+          btn.classList.add("stop");
+        } else if (realtimeEvent.type === "response.created") {
+          console.log("El modelo respondió:", realtimeEvent.response);
+          if (realtimeEvent.response && realtimeEvent.response.text) {
+            conversacion.push("Modelo: " + realtimeEvent.response.text);
+          }
+          // Si se recibe el mensaje final, se cierra la sesión
+          if (realtimeEvent.response &&
+              realtimeEvent.response.text &&
+              realtimeEvent.response.text.includes("en breve nos comunicaremos para entregar su certificado")) {
+            console.log("Mensaje final detectado. Cerrando canal.");
+            imprimirTranscripcion();
+            terminateSession();
+          }
+        }
+      });
+
+      console.log("Creando oferta SDP...");
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      console.log("Oferta local creada:\n", offer.sdp);
+
+      const baseUrl = "https://api.openai.com/v1/realtime";
+      const model = "gpt-4o-realtime-preview-2024-12-17";
+      console.log("Enviando oferta al Realtime API...");
+
+      const sdpResponse = await fetch(`${baseUrl}?model=${model}`, {
+        method: "POST",
+        body: offer.sdp,
+        headers: {
+          "Authorization": `Bearer ${EPHEMERAL_KEY}`,
+          "Content-Type": "application/sdp"
+        }
+      });
+
+      const remoteSdp = await sdpResponse.text();
+      console.log("Respuesta SDP obtenida:\n", remoteSdp);
+
+      await pc.setRemoteDescription({
+        type: "answer",
+        sdp: remoteSdp
+      });
+      console.log("RemoteDescription establecida.");
+    }
+
+    // Función para terminar la sesión
+    function terminateSession() {
+      if (dc) {
+        dc.close();
+        dc = null;
+      }
+      if (pc) {
+        pc.close();
+        pc = null;
+      }
+      sessionActive = false;
+      const btn = document.getElementById("sessionBtn");
+      btn.textContent = "Iniciar sesión";
+      btn.classList.remove("stop", "connecting");
+      btn.classList.add("start");
+    }
+
+    // Control del botón: inicia o termina la sesión
+    document.getElementById("sessionBtn").addEventListener("click", () => {
+      const btn = document.getElementById("sessionBtn");
+      if (!sessionActive) {
+        sessionActive = true;
+        // Cambia el botón a "Conectando" mientras se establece la conexión
+        btn.textContent = "Conectando";
+        btn.classList.remove("start");
+        btn.classList.add("connecting");
+        init();
+      } else {
+        terminateSession();
+      }
+    });
+  </script>
+</body>
+</html>
